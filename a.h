@@ -17,6 +17,8 @@ typedef struct fdent {
   dstr_t integrity_hash; /* 32 bytes for SHA256 */
   uint32_t integrity_block_size; /* 0x400000 */
   dsbuf_t integrity_blocks; /* 32 bytes x N */
+  int compression_algorithm; /* 0=none, 1=DEFLATE */
+  uint64_t compression_original_size;
 } fdent_t;
 
 extern fdent_t* fdeinit(fdent_t* mem);

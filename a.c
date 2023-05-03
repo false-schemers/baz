@@ -24,6 +24,8 @@ const char *g_exfile = NULL; /* excluded glob patterns file name */
 bool g_keepold = false; /* do not owerwrite existing files (-k) */
 int g_integrity = 0; /* check/calc integrity hashes; 1: SHA256 */
 int g_integerrc = 0; /* extraction integrity error count */
+int g_compression = 0; /* use compression; 1: DEFLATE */
+int g_comprerrc = 0; /* extraction compression error count */
 int g_format = 0; /* 'b': BSAR, 'a': ASAR, 0: check extension */
 dsbuf_t g_inpats; /* list of included patterns */
 dsbuf_t g_expats; /* list of excluded patterns */
@@ -190,6 +192,18 @@ void parse_header_files_json(JFILE *jfp, const char *base, fdebuf_t *pfdb)
           }
         }
         jfgetcbrc(jfp);
+      } else if (streql(key, "compression")) {
+        jfgetobrc(jfp);
+        while (!jfatcbrc(jfp)) {
+          key = jfgetkey(jfp, &kcb);
+          if (streql(key, "algorithm")) {
+            char *ia = jfgetstr(jfp, &kcb);
+            pfde->compression_algorithm = streql(ia, "DEFLATE");
+          } else if (streql(key, "originalSize")) {
+            pfde->compression_original_size = jfgetnumull(jfp); 
+          }
+        }
+        jfgetcbrc(jfp);
       } else { 
         exprintf("%s: invalid entry: %s", g_arfile, chbdata(&kcb));
       }
@@ -256,6 +270,20 @@ void parse_header_files_bson(BFILE *bfp, const char *base, fdebuf_t *pfdb)
               }  
             }
             bfgetcbrk(bfp);
+          }
+        }
+        bfgetcbrc(bfp);
+      } else if (streql(key, "compression")) {
+        int compression = 0; 
+        bfgetobrc(bfp);
+        while (!bfatcbrc(bfp)) {
+          key = bfgetkey(bfp, &kcb);
+          if (streql(key, "algorithm")) {
+            compression = bfgetnum(bfp);
+            if (compression == 1) pfde->compression_algorithm = 1; /* DEFLATE */
+          } else if (streql(key, "originalSize")) {
+            uint64_t n = bfgetnumull(bfp);
+            if (compression == 1) pfde->compression_original_size = n; 
           }
         }
         bfgetcbrc(bfp);
@@ -386,6 +414,15 @@ void unparse_header_files_json(JFILE *jfp, fdebuf_t *pfdb)
         }
         jfputcbrc(jfp);
       }
+      if (pfde->compression_algorithm == 1/*DEFLATE*/) {
+        jfputkey(jfp, "compression"); 
+        jfputobrc(jfp);
+        jfputkey(jfp, "algorithm"); 
+        jfputstr(jfp, "DEFLATE");
+        jfputkey(jfp, "originalSize"); 
+        jfputnumull(jfp, pfde->compression_original_size);
+        jfputcbrc(jfp);
+      }
     }
     jfputcbrc(jfp);
   }
@@ -443,6 +480,15 @@ void unparse_header_files_bson(BFILE *bfp, fdebuf_t *pfdb)
           }
           bfputcbrk(bfp);
         }
+        bfputcbrc(bfp);
+      }
+      if (pfde->compression_algorithm == 1/*DEFLATE*/) {
+        bfputkey(bfp, "compression"); 
+        bfputobrc(bfp);
+        bfputkey(bfp, "algorithm"); 
+        bfputnum(bfp, pfde->compression_algorithm);
+        bfputkey(bfp, "originalSize"); 
+        bfputnumull(bfp, pfde->compression_original_size);
         bfputcbrc(bfp);
       }
     }
@@ -530,9 +576,16 @@ void list_files(const char *base, fdebuf_t *pfdb, dsbuf_t *ppats, bool full, FIL
       if (!ppatsi) {
         if (full) {
           fprintf(pf, "-%c%c%c ", pfde->integrity_hash ? 'i' : '-',
-            pfde->executable ? 'x' : '-', pfde->unpacked ? 'u' : '-');
-          if (pfde->unpacked) fprintf(pf, "              %12lu ", (unsigned long)pfde->size);
-          else fprintf(pf, "@%-12lu %12lu ", (unsigned long)pfde->offset, (unsigned long)pfde->size);
+            pfde->executable ? 'x' : '-', 
+            pfde->unpacked ? 'u' : pfde->compression_algorithm ? 'z' : '-');
+          if (pfde->compression_algorithm) {
+            fprintf(pf, "#%-12lu %12lu ", 
+              (unsigned long)pfde->size, 
+              (unsigned long)pfde->compression_original_size);
+          } else {
+            fprintf(pf, "              %12lu ", 
+              (unsigned long)pfde->size);
+          }
         }
         if (!base) fprintf(pf, "%s\n", pfde->name);
         else fprintf(pf, "%s/%s\n", base, pfde->name);
@@ -572,10 +625,21 @@ size_t copy_file(FILE *ifp, FILE *ofp)
 
 void write_file(const char *path, fdent_t *pfde, FILE *ofp)
 {
-  chbuf_t cb = mkchb(); FILE *ifp;  
+  chbuf_t cb = mkchb(); FILE *ifp;
+  bool compress = (g_compression == 1);
+  size_t dsize; char *data = NULL;
+  char *wptr = NULL, *eptr = NULL;
   sha256ctx_t fhash, bhash;
   uint8_t digest[SHA256DG_SIZE];
   size_t bc = 0;
+  if (g_compression == 1) {
+    if (pfde->size < SIZE_MAX && (data = malloc((size_t)pfde->size)) != NULL) {
+      dsize = (size_t)pfde->size; wptr = data;
+      eptr = data + dsize;
+    } else {
+      logef("Warning: %s: too big for compression; will be written as-is\n", path);
+    }
+  }
   if ((ifp = fopen(path, "rb")) == NULL) {
     exprintf("%s: cannot open file:", path);
   }
@@ -594,17 +658,35 @@ void write_file(const char *path, fdent_t *pfde, FILE *ofp)
       sha256update(&fhash, g_buffer, n);
     }
     if (!n) break;
-    fwrite(g_buffer, 1, n, ofp);
+    if (data) {
+      if (wptr + n > eptr) 
+        exprintf("%s: actual file size (%lu) is different from stat file size (%lu)",
+          path, (unsigned long long)bc, (unsigned long)dsize);
+      memcpy(wptr, g_buffer, n); 
+      wptr += n;
+    } else {
+      fwrite(g_buffer, 1, n, ofp);
+    } 
     bc += n;
     if (n < g_bufsize) break;
   }
   if (bc != pfde->size) {
     exprintf("%s: actual file size (%llu) is different from stat file size (%llu)",
-      (unsigned long long)bc, (unsigned long long)pfde->size);
+      path, (unsigned long long)bc, (unsigned long long)pfde->size);
   }
   if (g_integrity == 1) {
     sha256fini(&fhash, digest);
     pfde->integrity_hash = exmemdup((char*)&digest[0], SHA256DG_SIZE);
+  }
+  if (data) {
+    size_t dlen = g_bufsize, slen = wptr-data;
+    int err = zdeflate(g_buffer, &dlen, data, &slen, 9);
+    if (err) exprintf("%s: compression error (%d)", path, err);
+    fwrite(g_buffer, 1, dlen, ofp);
+    pfde->compression_algorithm = 1;
+    pfde->compression_original_size = pfde->size;
+    pfde->size = dlen;
+    free(data);
   }
   fclose(ifp);
   chbfini(&cb);
@@ -831,6 +913,7 @@ int main(int argc, char **argv)
      "  --include-from=FILE          List/extract files via globbing patterns in FILE\n"
      "  --include=\"PATTERN\"          List/extract files, given as a globbing PATTERN\n"
      "  --integrity=SHA256           Calculate or check file integrity info\n"
+     "  -z, --compress=DEFLATE       Compress files while creating the archive\n"
      "\n"
      "Archive format selection:\n"
      "  -o, --format=asar            Create asar archive even if extension is not .asar\n"
@@ -887,6 +970,7 @@ int main(int argc, char **argv)
       case 't': g_cmd = 't'; gotmode = true; break;
       case 'x': g_cmd = 'x'; gotmode = true; break;
       case 'f': gotf = true; break;
+      case 'z': g_compression = 1; break;
       case 'o': g_format = 'a'; break;
       case 'k': g_keepold = true; break;
       case 'v': incverbosity(); break;
@@ -899,7 +983,7 @@ int main(int argc, char **argv)
     eoptind = 3;
   }
      
-  while ((opt = egetopt(argc, argv, "ctxf:kC:OX:owvqh-:")) != EOF) {
+  while ((opt = egetopt(argc, argv, "ctxf:kC:OX:zowvqh-:")) != EOF) {
     switch (opt) {
       case 'c': g_cmd = 'c'; break;
       case 't': g_cmd = 't'; break;
@@ -909,6 +993,7 @@ int main(int argc, char **argv)
       case 'C': g_dstdir = eoptarg; break;
       case 'O': g_dstdir = "-"; break;
       case 'X': g_exfile = eoptarg; break;
+      case 'z': g_compression = 1; break;
       case 'o': g_format = 'a'; break;
       case 'w': setwlevel(3); break;
       case 'v': incverbosity(); break;
@@ -936,6 +1021,8 @@ int main(int argc, char **argv)
         else if (streql(eoptarg, "help")) g_cmd = 'h';
         else if (streql(eoptarg, "integrity=SHA256")) g_integrity = 1;
         else if (streql(eoptarg, "integrity")) g_integrity = 1;
+        else if (streql(eoptarg, "compress=DEFLATE")) g_compression = 1;
+        else if (streql(eoptarg, "compress")) g_compression = 1;
         else if (streql(eoptarg, "old-archive")) g_format = 'a';
         else if (streql(eoptarg, "format=asar")) g_format = 'a';
         else if (streql(eoptarg, "format=baz")) g_format = 'b';
