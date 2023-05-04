@@ -626,7 +626,6 @@ size_t copy_file(FILE *ifp, FILE *ofp)
 void write_file(const char *path, fdent_t *pfde, FILE *ofp)
 {
   chbuf_t cb = mkchb(); FILE *ifp;
-  bool compress = (g_compression == 1);
   size_t dsize; char *data = NULL;
   char *wptr = NULL, *eptr = NULL;
   sha256ctx_t fhash, bhash;
@@ -725,8 +724,8 @@ uint64_t create_files(uint64_t off, const char *base, const char *path, fdebuf_t
         chbfini(&cbb), chbfini(&cbp);
       } else {
         pfde->offset = off;
-        off += pfde->size;
         write_file(path, pfde, ofp);
+        off += pfde->size;
       }
     }
   } else {
@@ -757,21 +756,51 @@ void create(int argc, char **argv)
 }
 
 
-/* copy file via fread/fwrite */
-size_t copy_file_n(FILE *ifp, FILE *ofp, size_t bytec, fdent_t *pfde)
+/* extract file via fread/fwrite; return # of bytes read from ifp */
+size_t extract_file(FILE *ifp, FILE *ofp, fdent_t *pfde)
 {
+  size_t dsize, csize; char *data = NULL;
+  char *rptr = NULL, *eptr = NULL;
   sha256ctx_t fhash, bhash;
   uint8_t digest[SHA256DG_SIZE];
   size_t bc = 0, ibidx = 0; 
   bool ckint = false;
+  size_t bytec;
   assert(ifp); assert(ofp);
+  if (pfde->compression_algorithm == 1) {
+    const char *name = pfde->name;
+    csize = (size_t)pfde->size;
+    dsize = (size_t)pfde->compression_original_size;
+    if (pfde->compression_original_size <= g_bufsize && (data = malloc(dsize)) != NULL) {
+      size_t n = fread(g_buffer, 1, csize, ifp);
+      int err; size_t dlen = dsize, slen = csize;
+      if (n != pfde->size) exprintf("%s: unexpected eof in %s\n", g_arfile, name);
+      err = zinflate(data, &dlen, g_buffer, &slen);
+      if (err) exprintf("%s: decompression error in %s (%d)\n", g_arfile, name, err);
+      if (dlen != dsize) exprintf("%s: decompression error in %s\n", g_arfile, name);
+      rptr = data;
+      eptr = data + dsize;
+    } else {
+      exprintf("%s: %s is too big for decompression\n", g_arfile, name);
+    }
+    bytec = dsize;
+  } else {
+    bytec = (size_t)pfde->size;
+  }
   if (g_integrity == 1 && pfde->integrity_algorithm == 1) {
     sha256init(&fhash);
     ckint = true;
   }
   while (bytec > 0) {
     size_t c = (bytec < g_bufsize) ? bytec : g_bufsize;
-    size_t n = fread(g_buffer, 1, c, ifp);
+    size_t n;
+    if (rptr) {
+      n = (rptr + c > eptr) ? eptr-rptr : c;
+      memcpy(g_buffer, rptr, n);
+      rptr += n;
+    } else {
+      n = fread(g_buffer, 1, c, ifp);
+    }
     if (!n) break;
     if (ckint) {
       sha256init(&bhash);
@@ -798,6 +827,8 @@ size_t copy_file_n(FILE *ifp, FILE *ofp, size_t bytec, fdent_t *pfde)
       if (getverbosity() > 1) logef("**** integrity checks passed\n");
     }
   }
+  /* return # of bytes read from ifp */
+  if (data) { free(data); return csize; }
   return bc;
 }
 
@@ -819,14 +850,22 @@ void extract_files(const char *base, uint32_t hsz, fdebuf_t *pfdb, dsbuf_t *ppat
       long long pos = (long long)hsz + (long long)pfde->offset;
       if (getverbosity() > 0) {
         logef("-%c%c%c ", pfde->integrity_hash ? 'i' : '-',
-          pfde->executable ? 'x' : '-', pfde->unpacked ? 'u' : '-');
-        if (pfde->unpacked) logef("              %12lu ", (unsigned long)pfde->size);
-        else logef("@%-12lu %12lu ", (unsigned long)pfde->offset, (unsigned long)pfde->size);
+          pfde->executable ? 'x' : '-', 
+          pfde->unpacked ? 'u' : 
+          pfde->compression_algorithm ? 'z' : '-');
+        if (pfde->compression_algorithm) {
+          logef("#%-12lu %12lu ", 
+            (unsigned long)pfde->size, 
+            (unsigned long)pfde->compression_original_size);
+        } else {
+          logef("              %12lu ", 
+            (unsigned long)pfde->size);
+        }
       }
       logef("%s\n", sbase);
       if (fseekll(fp, pos, SEEK_SET) != 0) exprintf("%s: seek failed", g_arfile);
       if (streql(g_dstdir, "-")) {
-        n = copy_file_n(fp, stdout, fsz, pfde);
+        n = extract_file(fp, stdout, pfde);
       } else {
         chbuf_t fcb = mkchb(), dcb = mkchb();
         char *dstdir = trimdirsep(chbsets(&dcb, g_dstdir));
@@ -846,7 +885,7 @@ void extract_files(const char *base, uint32_t hsz, fdebuf_t *pfdb, dsbuf_t *ppat
         if (!ofp) {
           exprintf("%s: can't open file for writing:", dpath);
         } else { 
-          n = copy_file_n(fp, ofp, fsz, pfde); 
+          n = extract_file(fp, ofp, pfde); 
           fclose(ofp); 
         }
         chbfini(&fcb), chbfini(&dcb);
@@ -890,6 +929,7 @@ int main(int argc, char **argv)
      "Examples:\n"
      "  baz -cf arch.bsar foo bar    # Create bsar archive from files foo and bar\n"
      "  baz -cf arch.asar foo bar    # Create asar archive from files foo and bar\n"
+     "  baz -ocfz arch.baz dir       # Create bsar archive by compressing files in dir\n"
      "  baz -tvf arch.bsar           # List all files in arch.bsar verbosely\n"
      "  baz -xf arch.bsar foo bar    # Extract files foo and bar from arch.bsar\n"
      "  baz -xf arch.bsar            # Extract all files from arch.bsar\n"
@@ -931,7 +971,8 @@ int main(int argc, char **argv)
      "  -h, --help                   Print this help, then exit\n"
      "\n"
      "Note: when creating archives (-c), only the name of each argument file/dir\n"
-     "is stored in the archive, not a complete path to the argument file/dir.\n");
+     "is stored in the archive, not a complete path to the argument file/dir.\n"
+     "Compressed .asar archives may be incompatible with other tools.\n");
 
   /* this is a test */
   if (argc == 2 && streql(argv[1], "cz")) {
@@ -1053,7 +1094,7 @@ int main(int argc, char **argv)
       extract(argc-eoptind, argv+eoptind);
     } break;
     case 'h': {
-      eusage("BAZ (Basic archiver with compression) 1.00 built on " __DATE__); 
+      eusage("BAZ (Basic Archiver with Zlib-like compression) 1.00 built on " __DATE__); 
     } break;
   }  
 
