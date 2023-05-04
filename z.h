@@ -19,6 +19,8 @@ extern bool pathparse2(const char *path, size_t *proot, size_t *prelpath);
 extern char *trimdirsep(char *pname);
 /* add dir separator to the end of pcb */
 extern void chbputdirsep(chbuf_t *pcb);
+/* quote arg as single argument for command line */
+extern void chbputarg(const char *arg, chbuf_t *pcb);
 
 /* portable version of filesystem stat */
 typedef struct fsstat_tag {
@@ -43,6 +45,10 @@ extern void ermdir(const char *dir);
 extern void emkdirp(const char *path);
 /* opens new tmp file in w+b; it is deleted when file closed or program exits/crashes */
 extern FILE *etmpopen(const char *mode);
+/* pipe for reading from cmd output or writing to cmd input */
+extern FILE *epopen(const char *cmd, const char *mode);
+/* closes pipe open with epopen */
+extern int epclose(FILE *pipe);
 
 /* sets stdin/stdout into binary mode (no-op on Unix) */
 extern void fbinary(FILE *stdfile);
@@ -56,3 +62,9 @@ extern long long ftellll(FILE *fp);
 /* set utf-8 code page */
 extern void setu8cp(void);
 
+/* inflate/deflate */
+extern size_t zdeflate_bound(size_t slen);
+/* in-memory deflate; lvl is 0-9; returns 0 on success, error otherwise */
+extern int zdeflate(uint8_t *dst, size_t *dlen, const uint8_t *src, size_t *slen, int lvl);
+/* in-memory inflate; returns 0 on success, 1 on dest overflow, other errors */
+extern int zinflate(uint8_t *dst, size_t *dlen, const uint8_t *src, size_t *slen);

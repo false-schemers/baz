@@ -443,9 +443,3 @@ extern void sha256update(sha256ctx_t *ctx, const void *mem, size_t len);
 extern void sha256fini(sha256ctx_t *ctx, uint8_t digest[SHA256DG_SIZE]);
 extern char *memsha256(const void *mem, size_t len, chbuf_t *pcb);
 
-/* inflate/deflate */
-extern size_t zdeflate_bound(size_t slen);
-/* in-memory deflate; lvl is 0-9; returns 0 on success, error otherwise */
-extern int zdeflate(uint8_t *dst, size_t *dlen, const uint8_t *src, size_t *slen, int lvl);
-/* in-memory inflate; returns 0 on success, 1 on dest overflow, other errors */
-extern int zinflate(uint8_t *dst, size_t *dlen, const uint8_t *src, size_t *slen);
