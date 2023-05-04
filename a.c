@@ -26,6 +26,7 @@ int g_integrity = 0; /* check/calc integrity hashes; 1: SHA256 */
 int g_integerrc = 0; /* extraction integrity error count */
 int g_compression = 0; /* use compression; 1: DEFLATE */
 int g_comprerrc = 0; /* extraction compression error count */
+int g_zopfli_i = 0; /* 0 or # of zopfli iterations */
 int g_format = 0; /* 'b': BSAR, 'a': ASAR, 0: check extension */
 dsbuf_t g_inpats; /* list of included patterns */
 dsbuf_t g_expats; /* list of excluded patterns */
@@ -677,17 +678,27 @@ void write_file(const char *path, fdent_t *pfde, FILE *ofp)
     sha256fini(&fhash, digest);
     pfde->integrity_hash = exmemdup((char*)&digest[0], SHA256DG_SIZE);
   }
+  fclose(ifp);
   if (data) {
     size_t dlen = g_bufsize, slen = wptr-data;
-    int err = zdeflate(g_buffer, &dlen, data, &slen, 9);
-    if (err) exprintf("%s: compression error (%d)", path, err);
+    if (g_zopfli_i > 0) {
+      chbsetf(&cb, "zopfli -c --deflate --i%d ", g_zopfli_i);
+      chbputarg(path, &cb);
+      logef("%s\n", chbdata(&cb));
+      ifp = epopen(chbdata(&cb), "rb");
+      dlen = fread(g_buffer, 1, dlen, ifp);
+      if (dlen >= g_bufsize) exprintf("%s: compressed data too large", path);
+      epclose(ifp);
+    } else { 
+      int err = zdeflate(g_buffer, &dlen, data, &slen, 9);
+      if (err) exprintf("%s: compression error (%d)", path, err);
+    }
     fwrite(g_buffer, 1, dlen, ofp);
     pfde->compression_algorithm = 1;
     pfde->compression_original_size = pfde->size;
     pfde->size = dlen;
     free(data);
   }
-  fclose(ifp);
   chbfini(&cb);
 }
 
@@ -954,6 +965,7 @@ int main(int argc, char **argv)
      "  --include=\"PATTERN\"          List/extract files, given as a globbing PATTERN\n"
      "  --integrity=SHA256           Calculate or check file integrity info\n"
      "  -z, --compress=DEFLATE       Compress files while creating the archive\n"
+     "  --zopfli=I                   Compress via external binary: zopfli --iI\n"
      "\n"
      "Archive format selection:\n"
      "  -o, --format=asar            Create asar archive even if extension is not .asar\n"
@@ -1064,6 +1076,7 @@ int main(int argc, char **argv)
         else if (streql(eoptarg, "integrity")) g_integrity = 1;
         else if (streql(eoptarg, "compress=DEFLATE")) g_compression = 1;
         else if (streql(eoptarg, "compress")) g_compression = 1;
+        else if ((arg = strprf(eoptarg, "zopfli=")) != NULL) g_zopfli_i = atoi(arg);   
         else if (streql(eoptarg, "old-archive")) g_format = 'a';
         else if (streql(eoptarg, "format=asar")) g_format = 'a';
         else if (streql(eoptarg, "format=baz")) g_format = 'b';
@@ -1072,6 +1085,7 @@ int main(int argc, char **argv)
     }
   }
   
+  if (g_zopfli_i > 0) g_compression = 1; else g_zopfli_i = 0; 
   if (streql(g_dstdir, "-")) fbinary(stdout);
   if (g_exfile) loadpats(&g_expats, g_exfile, patflags);
   if (g_infile) loadpats(&g_inpats, g_infile, patflags);
