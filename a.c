@@ -690,7 +690,7 @@ void write_file(const char *path, fdent_t *pfde, FILE *ofp)
       if (dlen >= g_bufsize) exprintf("%s: compressed data too large", path);
       epclose(ifp);
     } else { 
-      int err = zdeflate(g_buffer, &dlen, data, &slen, 9);
+      int err = zdeflate((uint8_t*)g_buffer, &dlen, (uint8_t*)data, &slen, 9);
       if (err) exprintf("%s: compression error (%d)", path, err);
     }
     fwrite(g_buffer, 1, dlen, ofp);
@@ -786,7 +786,7 @@ size_t extract_file(FILE *ifp, FILE *ofp, fdent_t *pfde)
       size_t n = fread(g_buffer, 1, csize, ifp);
       int err; size_t dlen = dsize, slen = csize;
       if (n != pfde->size) exprintf("%s: unexpected eof in %s\n", g_arfile, name);
-      err = zinflate(data, &dlen, g_buffer, &slen);
+      err = zinflate((uint8_t*)data, &dlen, (uint8_t*)g_buffer, &slen);
       if (err) exprintf("%s: decompression error in %s (%d)\n", g_arfile, name, err);
       if (dlen != dsize) exprintf("%s: decompression error in %s\n", g_arfile, name);
       rptr = data;
@@ -989,7 +989,7 @@ int main(int argc, char **argv)
   /* this is a test */
   if (argc == 2 && streql(argv[1], "cz")) {
     size_t slen, dlen; int err; 
-    uint8_t *src = g_buffer, *dst = g_buffer + g_bufsize/2;
+    uint8_t *src = (uint8_t*)g_buffer, *dst = (uint8_t*)g_buffer + g_bufsize/2;
     fbinary(stdin); fbinary(stdout);
     slen = fread(src, 1, g_bufsize, stdin);
     dlen = g_bufsize/2;
@@ -1002,7 +1002,7 @@ int main(int argc, char **argv)
     exit(0);
   } else if (argc == 2 && streql(argv[1], "dz")) {
     size_t slen, dlen; int err;
-    uint8_t *src = g_buffer, *dst = g_buffer + g_bufsize/2;
+    uint8_t *src = (uint8_t*)g_buffer, *dst = (uint8_t*)g_buffer + g_bufsize/2;
     fbinary(stdin); fbinary(stdout);
     slen = fread(src, 1, g_bufsize, stdin);
     if (slen > g_bufsize/4) exprintf("input is too big");
