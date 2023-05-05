@@ -27,7 +27,7 @@ int g_integerrc = 0; /* extraction integrity error count */
 int g_compression = 0; /* use compression; 1: DEFLATE */
 int g_comprerrc = 0; /* extraction compression error count */
 int g_zopfli_i = 0; /* 0 or # of zopfli iterations */
-int g_format = 0; /* 'b': BSAR, 'a': ASAR, 0: check extension */
+int g_format = 0; /* 'b': BSAR, 'a': ASAR, 'c': C dump, 0: check extension */
 dsbuf_t g_inpats; /* list of included patterns */
 dsbuf_t g_expats; /* list of excluded patterns */
 dsbuf_t g_unpats; /* list of unpacked patterns */
@@ -745,22 +745,118 @@ uint64_t create_files(uint64_t off, const char *base, const char *path, fdebuf_t
   return off;
 }
 
+void dump_files(const char *bname, const char *base, fdebuf_t *pfdb, dsbuf_t *ppats, FILE *ifp, FILE *ofp, buf_t *phb)
+{
+  size_t i; chbuf_t cb = mkchb();
+  for (i = 0; i < fdeblen(pfdb); ++i) {
+    fdent_t *pfde = fdebref(pfdb, i); 
+    dsbuf_t *ppatsi = ppats; const char *sbase;
+    if (!base) sbase = pfde->name;
+    else sbase = chbsetf(&cb, "%s/%s", base, pfde->name);
+    if (matchpats(sbase, pfde->name, &g_expats)) continue;
+    /* ppats == NULL means list this one and everything below */
+    if (ppatsi && matchpats(sbase, pfde->name, ppatsi)) ppatsi = NULL;
+    if (pfde->isdir) {
+      dump_files(bname, sbase, &pfde->files, ppatsi, ifp, ofp, phb);
+    } else {
+      if (!ppatsi && !pfde->unpacked) {
+        size_t n, fsz = (size_t)pfde->size, j, idx; 
+        long long pos = (long long)pfde->offset;
+        chbuf_t cbp = mkchb(); uint64_t *phe;
+        char *path = base 
+          ? chbsetf(&cbp, "%s/%s", base, pfde->name)
+          : chbsetf(&cbp, "%s", pfde->name);
+        idx = buflen(phb);
+        if (pfde->size > g_bufsize) exprintf("member too big: %s", path);
+        if (fseekll(ifp, pos, SEEK_SET) != 0) exprintf("%s: seek failed", path);
+        n = fread(g_buffer, 1, fsz, ifp);
+        if (n != fsz) exprintf("%s: read failed", path);
+        if (pfde->compression_algorithm == 1) {
+          fprintf(ofp, "/* %s (DEFLATEd, org. size %lu) */\n", path, 
+            (unsigned long)pfde->compression_original_size);
+        } else {
+          fprintf(ofp, "/* %s */\n", path);
+        }
+        fprintf(ofp, "static unsigned char file_%s_%d[%lu] = {\n", bname, (int)idx, (unsigned long)fsz);
+        fprintf(ofp, "  \"");
+        for (j = 0; j < n; ++j) {
+          fprintf(ofp, "\\%o", g_buffer[j] & 0xFF);
+          if (j > 0 && j % 32 == 0) fprintf(ofp, "\"\n  \"");
+        } 
+        fprintf(ofp, "\"\n};\n\n");
+        phe = bufnewbk(phb);
+        phe[0] = (uint64_t)exstrdup(path);
+        phe[1] = fsz;
+        phe[2] = pfde->compression_algorithm;
+        phe[3] = pfde->compression_original_size;
+        phe[4] = idx;
+        chbfini(&cbp);
+      }
+    }
+  }
+  chbfini(&cb);
+}
+
+static int he_cmp(const void *p1, const void *p2)
+{
+  const uint64_t *phe1 = p1, *phe2 = p2;
+  const dstr_t name1 = (dstr_t)phe1[0], name2 = (dstr_t)phe2[0]; 
+  return strcmp(name1, name2);
+}
+
+void dump(FILE *ifp, fdebuf_t *pfdeb, FILE *ofp)
+{
+  chbuf_t cb = mkchb(), ncb = mkchb(); 
+  char *aname = getfname(g_arfile);
+  char *bname = chbset(&ncb, aname, spanfbase(aname));
+  buf_t hb = mkbuf(sizeof(uint64_t)*5);
+  size_t i;
+  fprintf(ofp, "/* baz in-memory archive */\n\n");
+  dump_files(bname, NULL, pfdeb, dsbempty(&g_inpats) ? NULL : &g_inpats, ifp, ofp, &hb);
+  fprintf(ofp, "/* %s directory (sorted by path) */\n", bname);
+  bufqsort(&hb, &he_cmp);
+  fprintf(ofp, "struct bazdir directory_%s[%lu] = {\n", bname, (int)buflen(&hb));
+  for (i = 0; i < buflen(&hb); ++i) {
+    uint64_t *phe = bufref(&hb, i);
+    dstr_t name = (dstr_t)phe[0]; 
+    size_t fsz = (size_t)phe[1];
+    int alg = (int)phe[2];
+    size_t osz = (size_t)phe[3];
+    int idx = (int)phe[4]; 
+    fprintf(ofp, "  { \"%s\", %lu, %d, %lu, file_%s_%d },\n", 
+      name, (unsigned long)fsz, alg, (unsigned long)osz, bname, idx);
+    free(name);
+  }
+  fprintf(ofp, "};\n\n");
+  chbfini(&cb), chbfini(&ncb);
+}
+
 void create(int argc, char **argv)
 {
   FILE *fp, *tfp; fdebuf_t fdeb;
   int i, format; uint64_t off = 0;
-  if (!(fp = fopen(g_arfile, "wb"))) exprintf("can't open archive file %s:", g_arfile);
-  format = g_format ? g_format : strsuf(g_arfile, ".asar") ? 'a' : 'b';
+  format = g_format;
+  if (!format && strsuf(g_arfile, ".asar")) format = 'a';
+  if (!format && strsuf(g_arfile, ".bsar")) format = 'b';
+  if (!format && strsuf(g_arfile, ".h")) format = 'c';
+  if (!format && strsuf(g_arfile, ".c")) format = 'c';
+  if (!format) format = 'b';
+  if (!(fp = fopen(g_arfile, format == 'c' ? "w" : "wb"))) 
+    exprintf("can't open archive file %s:", g_arfile);
   tfp = etmpopen("w+b");
   fdebinit(&fdeb);
   for (i = 0; i < argc; ++i) {
     /* NB: we don't care where file/dir arg is located */
     off = create_files(off, getfname(argv[i]), argv[i], &fdeb, tfp);
   }
-  list_files(NULL, &fdeb, NULL, getverbosity()>0, stdout);
-  write_header(format, &fdeb, fp);
   rewind(tfp);
-  copy_file(tfp, fp);
+  list_files(NULL, &fdeb, NULL, getverbosity()>0, stdout);
+  if (format == 'c') {
+    dump(tfp, &fdeb, fp);
+  } else {
+    write_header(format, &fdeb, fp);
+    copy_file(tfp, fp);
+  }
   fclose(tfp);
   fclose(fp);
   fdebfini(&fdeb);
@@ -935,18 +1031,19 @@ int main(int argc, char **argv)
   setprogname(argv[0]);
   setusage
     ("[OPTION]... [FILE/DIR]...\n"
-     "The archiver works with .asar (json header) and .bsar (bson header) archives.\n"
+     /* "The archiver works with .asar (json header) and .bsar (bson header) archives.\n" */
      "\n"
      "Examples:\n"
      "  baz -cf arch.bsar foo bar    # Create bsar archive from files foo and bar\n"
      "  baz -cf arch.asar foo bar    # Create asar archive from files foo and bar\n"
      "  baz -ocfz arch.baz dir       # Create bsar archive by compressing files in dir\n"
+     "  baz -dcfz arch.c dir         # Create C dump archive by compressing files in dir\n"
      "  baz -tvf arch.bsar           # List all files in arch.bsar verbosely\n"
      "  baz -xf arch.bsar foo bar    # Extract files foo and bar from arch.bsar\n"
      "  baz -xf arch.bsar            # Extract all files from arch.bsar\n"
-     "\n"
+     /* "\n"
      "If a long option shows an argument as mandatory, then it is mandatory\n"
-     "for the equivalent short option also.  Similarly for optional arguments.\n"     
+     "for the equivalent short option also.  Similarly for optional arguments.\n" */
      "\n"
      "Main operation mode:\n"
      "  -c, --create                 Create a new archive\n"
@@ -959,17 +1056,18 @@ int main(int argc, char **argv)
      "  -C, --directory=DIR          Use directory DIR for extracted files\n"
      "  -O, --to-stdout              Extract files to standard output\n"
      "  -X, --exclude-from=FILE      Exclude files via globbing patterns in FILE\n"
+     "  -z, --compress=DEFLATE       Compress files while creating the archive\n"
      "  --exclude=\"PATTERN\"          Exclude files, given as a globbing PATTERN\n"
      "  --unpack=\"PATTERN\"           Exclude files, but keep their info in archive\n"
      "  --include-from=FILE          List/extract files via globbing patterns in FILE\n"
      "  --include=\"PATTERN\"          List/extract files, given as a globbing PATTERN\n"
      "  --integrity=SHA256           Calculate or check file integrity info\n"
-     "  -z, --compress=DEFLATE       Compress files while creating the archive\n"
      "  --zopfli=I                   Compress via external binary: zopfli --iI\n"
      "\n"
      "Archive format selection:\n"
+     "  -b, --format=bsar            Create bsar archive independently of extension\n"
      "  -o, --format=asar            Create asar archive even if extension is not .asar\n"
-     "  --format=bsar                Create bsar archive even if extension is .asar\n"
+     "  -d, --format=cdump           Create C dump even if extension is not .h or .c\n"
      "\n"
      "File name matching options:\n"
      "   --anchored                  Patterns match path\n"
@@ -986,34 +1084,6 @@ int main(int argc, char **argv)
      "is stored in the archive, not a complete path to the argument file/dir.\n"
      "Compressed .asar archives may be incompatible with other tools.\n");
 
-  /* this is a test */
-  if (argc == 2 && streql(argv[1], "cz")) {
-    size_t slen, dlen; int err; 
-    uint8_t *src = (uint8_t*)g_buffer, *dst = (uint8_t*)g_buffer + g_bufsize/2;
-    fbinary(stdin); fbinary(stdout);
-    slen = fread(src, 1, g_bufsize, stdin);
-    dlen = g_bufsize/2;
-    if (slen > g_bufsize/4) exprintf("input is too big");
-    if (zdeflate_bound(slen) > dlen) exprintf("output is too big"); 
-    err = zdeflate(dst, &dlen, src, &slen, 9);
-    if (err != 0) exprintf("deflate error: %d", err); 
-    logef("input: %ld bytes, output: %ld bytes, compression = %.2g\n\n", (long)slen, (long)dlen, (double)dlen/(double)slen);
-    fwrite(dst, 1, dlen, stdout);
-    exit(0);
-  } else if (argc == 2 && streql(argv[1], "dz")) {
-    size_t slen, dlen; int err;
-    uint8_t *src = (uint8_t*)g_buffer, *dst = (uint8_t*)g_buffer + g_bufsize/2;
-    fbinary(stdin); fbinary(stdout);
-    slen = fread(src, 1, g_bufsize, stdin);
-    if (slen > g_bufsize/4) exprintf("input is too big");
-    dlen = g_bufsize/2;
-    err = zinflate(dst, &dlen, src, &slen);
-    if (err != 0) exprintf("inflate error: %d", err); 
-    logef("input: %ld bytes, output: %ld bytes, compression = %.2g\n\n", (long)slen, (long)dlen, (double)slen/(double)dlen);
-    fwrite(dst, 1, (size_t)dlen, stdout);
-    exit(0);
-  }
-  
   if (argc >= 3 && *argv[1] != '-') {
     /* traditional tar-like usage: cmd archive ... */
     char *cmd = argv[1];
@@ -1024,7 +1094,9 @@ int main(int argc, char **argv)
       case 'x': g_cmd = 'x'; gotmode = true; break;
       case 'f': gotf = true; break;
       case 'z': g_compression = 1; break;
+      case 'b': g_format = 'b'; break;
       case 'o': g_format = 'a'; break;
+      case 'd': g_format = 'c'; break;
       case 'k': g_keepold = true; break;
       case 'v': incverbosity(); break;
       default: eusage("unexpected flag in command combo: %c", *--cmd);
@@ -1036,7 +1108,7 @@ int main(int argc, char **argv)
     eoptind = 3;
   }
      
-  while ((opt = egetopt(argc, argv, "ctxf:kC:OX:zowvqh-:")) != EOF) {
+  while ((opt = egetopt(argc, argv, "ctxf:kC:OX:zbodwvqh-:")) != EOF) {
     switch (opt) {
       case 'c': g_cmd = 'c'; break;
       case 't': g_cmd = 't'; break;
@@ -1047,7 +1119,9 @@ int main(int argc, char **argv)
       case 'O': g_dstdir = "-"; break;
       case 'X': g_exfile = eoptarg; break;
       case 'z': g_compression = 1; break;
+      case 'b': g_format = 'b'; break;
       case 'o': g_format = 'a'; break;
+      case 'd': g_format = 'c'; break;
       case 'w': setwlevel(3); break;
       case 'v': incverbosity(); break;
       case 'q': incquietness(); break;
@@ -1077,9 +1151,9 @@ int main(int argc, char **argv)
         else if (streql(eoptarg, "compress=DEFLATE")) g_compression = 1;
         else if (streql(eoptarg, "compress")) g_compression = 1;
         else if ((arg = strprf(eoptarg, "zopfli=")) != NULL) g_zopfli_i = atoi(arg);   
-        else if (streql(eoptarg, "old-archive")) g_format = 'a';
         else if (streql(eoptarg, "format=asar")) g_format = 'a';
         else if (streql(eoptarg, "format=baz")) g_format = 'b';
+        else if (streql(eoptarg, "format=cdump")) g_format = 'c';
         else eusage("illegal option: --%s", eoptarg);  
       } break;
     }
