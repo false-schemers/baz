@@ -772,6 +772,8 @@ FILE* epopen(const char *cmd, const char *mode)
 #if defined(_MSC_VER)
   fp = _popen(cmd, mode);
 #else
+  /* some libraries fail on "rb"/"wb" */
+  mode = strchr(mode, 'w') ? "w" : "r";
   fp = popen(cmd, mode);
 #endif
   if (!fp) exprintf("pipe open error: %s", cmd);
@@ -844,7 +846,7 @@ void setu8cp(void)
 #endif
 
 
-#ifdef USE_ZLIB
+#ifdef USEZLIB
 #include <zlib.h>
 
 int zdeflate(uint8_t *dst, size_t *dlen, const uint8_t *src, size_t *slen, int lvl)
