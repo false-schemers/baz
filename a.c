@@ -804,6 +804,9 @@ static int he_cmp(const void *p1, const void *p2)
   return strcmp(name1, name2);
 }
 
+static char *baz_dump_start = "/* start of in-memory archive */";
+static char *baz_dump_end = "/* end of in-memory archive */";
+
 void dump(FILE *ifp, fdebuf_t *pfdeb, FILE *ofp)
 {
   chbuf_t cb = mkchb(), ncb = mkchb(); 
@@ -811,7 +814,7 @@ void dump(FILE *ifp, fdebuf_t *pfdeb, FILE *ofp)
   char *bname = chbset(&ncb, aname, spanfbase(aname));
   buf_t hb = mkbuf(sizeof(uint64_t)*5);
   size_t i;
-  fprintf(ofp, "/* baz in-memory archive */\n\n");
+  fprintf(ofp, "%s\n\n", baz_dump_start);
   dump_files(bname, NULL, pfdeb, dsbempty(&g_inpats) ? NULL : &g_inpats, ifp, ofp, &hb);
   fprintf(ofp, "/* %s directory (sorted by path) */\n", bname);
   bufqsort(&hb, &he_cmp);
@@ -828,19 +831,47 @@ void dump(FILE *ifp, fdebuf_t *pfdeb, FILE *ofp)
     free(name);
   }
   fprintf(ofp, "};\n\n");
+  fprintf(ofp, "%s\n", baz_dump_end);
   chbfini(&cb), chbfini(&ncb);
+}
+
+void read_prologue_epilogue(FILE *fp, chbuf_t *pcbp, chbuf_t *pcbe)
+{
+  chbuf_t lcb = mkchb();
+  char *line; int state = 0;
+  while ((line = fgetlb(&lcb, fp)) != NULL) {
+    switch (state) {
+      case 0: {
+        if (streql(line, baz_dump_start)) state = 1;
+        else chbputf(pcbp, "%s\n", line);
+      } break;
+      case 1: {
+        if (streql(line, baz_dump_end)) state = 2;
+      } break;
+      case 2: {
+        chbputf(pcbe, "%s\n", line);
+      } break;
+    }
+  }
+  chbfini(&lcb);
 }
 
 void create(int argc, char **argv)
 {
   FILE *fp, *tfp; fdebuf_t fdeb;
   int i, format; uint64_t off = 0;
+  chbuf_t cbp = mkchb(), cbe = mkchb();
   format = g_format;
   if (!format && strsuf(g_arfile, ".asar")) format = 'a';
   if (!format && strsuf(g_arfile, ".bsar")) format = 'b';
   if (!format && strsuf(g_arfile, ".h")) format = 'c';
   if (!format && strsuf(g_arfile, ".c")) format = 'c';
   if (!format) format = 'b';
+  if (format == 'c' && (fp = fopen(g_arfile, "r")) != NULL) {
+    logef("%s exists; replacing dump section...\n", g_arfile);
+    read_prologue_epilogue(fp, &cbp, &cbe);
+    fclose(fp);
+  }
   if (!(fp = fopen(g_arfile, format == 'c' ? "w" : "wb"))) 
     exprintf("can't open archive file %s:", g_arfile);
   tfp = etmpopen("w+b");
@@ -852,7 +883,9 @@ void create(int argc, char **argv)
   rewind(tfp);
   list_files(NULL, &fdeb, NULL, getverbosity()>0, stdout);
   if (format == 'c') {
+    fputs(chbdata(&cbp), fp);
     dump(tfp, &fdeb, fp);
+    fputs(chbdata(&cbe), fp);
   } else {
     write_header(format, &fdeb, fp);
     copy_file(tfp, fp);
@@ -860,6 +893,7 @@ void create(int argc, char **argv)
   fclose(tfp);
   fclose(fp);
   fdebfini(&fdeb);
+  chbfini(&cbp), chbfini(&cbe);
 }
 
 
