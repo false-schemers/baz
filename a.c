@@ -818,7 +818,7 @@ void dump(FILE *ifp, fdebuf_t *pfdeb, FILE *ofp)
   dump_files(bname, NULL, pfdeb, dsbempty(&g_inpats) ? NULL : &g_inpats, ifp, ofp, &hb);
   fprintf(ofp, "/* %s directory (sorted by path) */\n", bname);
   bufqsort(&hb, &he_cmp);
-  fprintf(ofp, "struct bazdir directory_%s[%lu] = {\n", bname, (int)buflen(&hb));
+  fprintf(ofp, "struct bazdir directory_%s[%d] = {\n", bname, (int)buflen(&hb));
   for (i = 0; i < buflen(&hb); ++i) {
     uint64_t *phe = bufref(&hb, i);
     dstr_t name = (dstr_t)phe[0]; 
