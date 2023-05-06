@@ -785,7 +785,7 @@ int epclose(FILE *pipe)
 { 
   int res;
   assert(pipe);
-#ifdef WIN32
+#if defined(_MSC_VER)
   res = _pclose(pipe);
 #else
   res = pclose(pipe);
