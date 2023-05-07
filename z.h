@@ -18,9 +18,9 @@ extern bool pathparse2(const char *path, size_t *proot, size_t *prelpath);
 /* trim optional separator at the end of pname */
 extern char *trimdirsep(char *pname);
 /* add dir separator to the end of pcb */
-extern void chbputdirsep(chbuf_t *pcb);
+extern void cbputdirsep(cbuf_t *pcb);
 /* quote arg as single argument for command line */
-extern void chbputarg(const char *arg, chbuf_t *pcb);
+extern void cbputarg(const char *arg, cbuf_t *pcb);
 
 /* portable version of filesystem stat */
 typedef struct fsstat_tag {
