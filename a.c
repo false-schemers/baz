@@ -777,13 +777,13 @@ void dump_files(const char *bname, const char *base, fdebuf_t *pfdb, dsbuf_t *pp
         } else {
           fprintf(ofp, "/* %s */\n", path);
         }
-        fprintf(ofp, "static unsigned char file_%s_%d[%lu] = {\n", bname, (int)idx, (unsigned long)fsz);
+        fprintf(ofp, "static unsigned char file_%s_%d[%lu] =\n", bname, (int)idx, (unsigned long)fsz);
         fprintf(ofp, "  \"");
         for (j = 0; j < n; ++j) {
           fprintf(ofp, "\\%o", g_buffer[j] & 0xFF);
           if (j > 0 && j % 32 == 0) fprintf(ofp, "\"\n  \"");
         } 
-        fprintf(ofp, "\"\n};\n\n");
+        fprintf(ofp, "\";\n\n");
         phe = bufnewbk(phb);
         phe[0] = (uint64_t)estrdup(path);
         phe[1] = fsz;
@@ -826,7 +826,7 @@ void dump(FILE *ifp, fdebuf_t *pfdeb, FILE *ofp)
     int alg = (int)phe[2];
     size_t osz = (size_t)phe[3];
     int idx = (int)phe[4]; 
-    fprintf(ofp, "  { \"%s\", %lu, %d, %lu, file_%s_%d },\n", 
+    fprintf(ofp, "  { \"%s\", %lu, %d, %lu, &file_%s_%d[0] },\n", 
       name, (unsigned long)fsz, alg, (unsigned long)osz, bname, idx);
     free(name);
   }
